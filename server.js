@@ -122,9 +122,11 @@ app.post('/extract-emails', async (req, res) => {
             emails = extractEmails(htmlContent);
             extractedEmails.push(...emails);
             
-            // Extract Facebook URLs from HTML content
-            facebookUrls = extractFacebookUrls(htmlContent);
-            extractedFacebookUrls.push(...facebookUrls);
+            // Only extract Facebook URLs if no emails were found
+            if (emails.length === 0) {
+              facebookUrls = extractFacebookUrls(htmlContent);
+              extractedFacebookUrls.push(...facebookUrls);
+            }
             
             // Get visible text for response (without HTML replacement)
             fullText = await page.evaluate(() => {
@@ -140,9 +142,11 @@ app.post('/extract-emails', async (req, res) => {
             emails = extractEmails(htmlContent);
             extractedEmails.push(...emails);
             
-            // Extract Facebook URLs from HTML content
-            facebookUrls = extractFacebookUrls(htmlContent);
-            extractedFacebookUrls.push(...facebookUrls);
+            // Only extract Facebook URLs if no emails were found
+            if (emails.length === 0) {
+              facebookUrls = extractFacebookUrls(htmlContent);
+              extractedFacebookUrls.push(...facebookUrls);
+            }
             
             // Get visible text for response (without HTML replacement)
             fullText = html.replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -177,17 +181,24 @@ app.post('/extract-emails', async (req, res) => {
     const uniqueEmails = [...new Set(extractedEmails)];
     const uniqueFacebookUrls = [...new Set(extractedFacebookUrls)];
 
-    res.json({
+    // Build response object
+    const response = {
       success: true,
       url: url,
       emailsFound: uniqueEmails.length,
       emails: uniqueEmails,
-      facebookUrlsFound: uniqueFacebookUrls.length,
-      facebookUrls: uniqueFacebookUrls,
       pagesCrawled: visitedUrls.size,
       crawledUrls: Array.from(visitedUrls),
       // extractedTexts: allTexts
-    });
+    };
+
+    // Only include Facebook URLs if no emails were found
+    if (uniqueEmails.length === 0) {
+      response.facebookUrlsFound = uniqueFacebookUrls.length;
+      response.facebookUrls = uniqueFacebookUrls;
+    }
+
+    res.json(response);
 
   } catch (error) {
     console.error('Error during email extraction:', error);
