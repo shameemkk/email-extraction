@@ -3,7 +3,7 @@ import cors from 'cors';
 import { AdaptivePlaywrightCrawler } from 'crawlee';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
@@ -48,7 +48,7 @@ function extractFacebookUrls(text) {
     if (pathPart.length < 2) return false;
     
     // Skip common non-profile paths
-    const skipPatterns = ['home', 'login', 'register', 'help', 'about', 'privacy', 'terms', 'cookies', 'settings'];
+    const skipPatterns = ['home', 'login', 'register', 'help', 'privacy', 'terms', 'cookies', 'settings'];
     if (skipPatterns.includes(pathPart.toLowerCase())) return false;
     
     // Skip URLs with backslashes or other invalid characters
@@ -94,7 +94,8 @@ app.post('/extract-emails', async (req, res) => {
 
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
-      maxRequestsPerCrawl: 10, // Limit to prevent excessive crawling
+      maxRequestsPerCrawl: 20, // Increased limit for better navigation coverage
+      maxConcurrency: 3, // Allow some parallel processing
 
       async requestHandler({ page, response, enqueueLinks, log, request }) {
         const currentUrl = request.url;
@@ -167,10 +168,64 @@ app.post('/extract-emails', async (req, res) => {
           log.error(`Failed to extract text from ${currentUrl}: ${err}`);
         }
 
-        // Optionally enqueue more links (limited to same domain)
+        // Extract and enqueue navigation links and common pages
+        if (page) {
+          try {
+            // Get navigation links from common selectors
+            const navLinks = await page.evaluate(() => {
+              const links = [];
+              
+              // Common navigation selectors
+              const navSelectors = [
+                'nav a', 'header a', '.navbar a', '.nav a', '.navigation a',
+                '.menu a', '.main-menu a', '.primary-menu a', '.top-menu a',
+                '[role="navigation"] a', '.site-nav a', '.main-nav a'
+              ];
+              
+              navSelectors.forEach(selector => {
+                const elements = document.querySelectorAll(selector);
+                elements.forEach(el => {
+                  const href = el.getAttribute('href');
+                  if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+                    links.push(href);
+                  }
+                });
+              });
+              
+              return links;
+            });
+            
+            // Add specific common pages to crawl
+            const baseUrl = new URL(currentUrl);
+            const commonPages = ['/about/', '/contact/', '/about', '/contact', '/about-us/', '/contact-us/'];
+            
+            commonPages.forEach(page => {
+              try {
+                const fullUrl = new URL(page, baseUrl.origin).href;
+                navLinks.push(fullUrl);
+              } catch (e) {
+                // Skip invalid URLs
+              }
+            });
+            
+            // Enqueue navigation links
+            if (navLinks.length > 0) {
+              log.info(`Found ${navLinks.length} navigation links on ${currentUrl}:`, navLinks.slice(0, 5)); // Log first 5 links
+              await enqueueLinks({
+                urls: navLinks,
+                strategy: 'same-domain',
+                limit: 15 // Increased limit for better coverage
+              });
+            }
+          } catch (err) {
+            log.warning(`Failed to extract navigation links from ${currentUrl}: ${err}`);
+          }
+        }
+        
+        // Also enqueue general same-domain links as fallback
         await enqueueLinks({
           strategy: 'same-domain',
-          limit: 10 // Limit additional pages
+          limit: 5 // Reduced since we're doing targeted navigation above
         });
       },
     });
