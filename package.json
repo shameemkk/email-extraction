@@ -5,7 +5,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "pm2-runtime server.js",
+    "start": "node server.js",
     "dev": "node --watch server.js"
   },
   "dependencies": {
