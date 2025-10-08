@@ -1,50 +1,40 @@
 # Use Node.js 18 LTS as base image
-FROM node:18-alpine
+FROM node:18-slim
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies required for Playwright
-RUN apk add --no-cache \
-    chromium \
-    nss \
-    freetype \
-    freetype-dev \
-    harfbuzz \
+# Install system dependencies for Playwright
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
     ca-certificates \
-    ttf-freefont
-
-# Set Playwright to use system Chromium
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    procps \
+    libxss1 \
+    libgconf-2-4 \
+    libxrandr2 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libatk1.0-0 \
+    libcairo-gobject2 \
+    libgtk-3-0 \
+    libgdk-pixbuf2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
+# Install npm dependencies and global packages
 RUN npm install && \
+    npm install -g pm2 && \
     npx playwright install-deps && \
     npx playwright install chromium
 
 # Copy application code
 COPY . .
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
-
-# Change ownership of the app directory
-RUN chown -R nodejs:nodejs /app
-
-# Switch to non-root user
-USER nodejs
-
 # Expose port
-EXPOSE 3001
+EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
-
-# Start the application
-CMD ["npm", "start"]
+# Start the application with PM2
+CMD ["pm2-runtime", "start", "server.js", "--name", "email-extraction-api"]
