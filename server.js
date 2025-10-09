@@ -61,6 +61,13 @@ function extractEmails(html) {
     emails.push(match[1]);
   }
   
+  // Extract emails wrapped in HTML tags (like font, b, span, etc.)
+  const htmlEmailRegex = /<[^>]*>([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})<\/[^>]*>/gi;
+  const htmlEmailMatches = html.matchAll(htmlEmailRegex);
+  for (const match of htmlEmailMatches) {
+    emails.push(match[1]);
+  }
+  
   // Extract emails from plain text (after removing HTML tags)
   const textContent = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
