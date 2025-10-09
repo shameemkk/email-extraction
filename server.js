@@ -1,9 +1,47 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { AdaptivePlaywrightCrawler } from 'crawlee';
+import { AdaptivePlaywrightCrawler, RequestQueue, Configuration } from 'crawlee';
+import { createClient } from '@supabase/supabase-js';
+import { v4 as uuidv4 } from 'uuid';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Configuration
+const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 4;
+const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE) || 5;
+const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY) || 1000; // 1 second between requests
+
+// Supabase configuration
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables.');
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Crawlee configuration
+Configuration.set('STORAGE_CLIENT_OPTIONS', {
+  storageDir: './storage',
+});
+
+// Global request queue
+let requestQueue;
+
+// Initialize request queue
+async function initializeQueue() {
+  try {
+    requestQueue = await RequestQueue.open('email-extraction-queue');
+    console.log('Request queue initialized');
+  } catch (error) {
+    console.error('Failed to initialize request queue:', error);
+    process.exit(1);
+  }
+}
 
 // Middleware
 app.use(cors());
@@ -65,37 +103,102 @@ function extractFacebookUrls(text) {
   return [...new Set(finalUrls)]; // Remove duplicates
 }
 
-// Express endpoint for email extraction
-app.post('/extract-emails', async (req, res) => {
+// Database helper functions
+async function createJob(jobId, url) {
   try {
-    const { url } = req.body;
-    
-    if (!url) {
-      return res.status(400).json({ 
-        error: 'URL is required',
-        message: 'Please provide a URL in the request body'
-      });
+    const { data, error } = await supabase
+      .from('email_scrap_jobs')
+      .insert({
+        job_id: jobId,
+        url: url,
+        status: 'queued'
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error creating job:', error);
+      throw error;
     }
 
-    // Validate URL format
-    try {
-      new URL(url);
-    } catch (error) {
-      return res.status(400).json({ 
-        error: 'Invalid URL format',
-        message: 'Please provide a valid URL'
-      });
+    return data;
+  } catch (error) {
+    console.error('Failed to create job:', error);
+    throw error;
+  }
+}
+
+async function updateJobStatus(jobId, status, updates = {}) {
+  try {
+    const updateData = {
+      status,
+      ...updates
+    };
+
+    if (status === 'processing' && !updates.started_at) {
+      updateData.started_at = new Date().toISOString();
     }
+
+    if (status === 'done' || status === 'error') {
+      updateData.completed_at = new Date().toISOString();
+    }
+
+    const { data, error } = await supabase
+      .from('email_scrap_jobs')
+      .update(updateData)
+      .eq('job_id', jobId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error updating job:', error);
+      throw error;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Failed to update job:', error);
+    throw error;
+  }
+}
+
+async function getJob(jobId) {
+  try {
+    const { data, error } = await supabase
+      .from('email_scrap_jobs')
+      .select('*')
+      .eq('job_id', jobId)
+      .single();
+
+    if (error) {
+      console.error('Error getting job:', error);
+      throw error;
+    }
+
+    return data;
+  } catch (error) {
+    console.error('Failed to get job:', error);
+    throw error;
+  }
+}
+
+// Worker function to process jobs
+async function processJob(jobId, url) {
+  console.log(`Starting job ${jobId} for URL: ${url}`);
+  
+  try {
+    // Update job status to processing
+    await updateJobStatus(jobId, 'processing');
 
     const extractedEmails = [];
     const extractedFacebookUrls = [];
     const visitedUrls = new Set();
-    const allTexts = [];
 
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
-      maxRequestsPerCrawl: 20, // Increased limit for better navigation coverage
-      maxConcurrency: 3, // Allow some parallel processing
+      maxRequestsPerCrawl: 20,
+      maxConcurrency: 2, // Reduced concurrency for individual jobs
+      requestQueue,
 
       async requestHandler({ page, response, enqueueLinks, log, request }) {
         const currentUrl = request.url;
@@ -105,8 +208,6 @@ app.post('/extract-emails', async (req, res) => {
           return;
         }
         visitedUrls.add(currentUrl);
-
-        let fullText = '';
 
         try {
           let emails = [];
@@ -129,11 +230,6 @@ app.post('/extract-emails', async (req, res) => {
               extractedFacebookUrls.push(...facebookUrls);
             }
             
-            // Get visible text for response (without HTML replacement)
-            fullText = await page.evaluate(() => {
-              return document.body.innerText;
-            });
-            
           } else if (response) {
             // If rendering was skipped (straight HTTP), use the raw HTML
             const html = await response.text();
@@ -148,34 +244,19 @@ app.post('/extract-emails', async (req, res) => {
               facebookUrls = extractFacebookUrls(htmlContent);
               extractedFacebookUrls.push(...facebookUrls);
             }
-            
-            // Get visible text for response (without HTML replacement)
-            fullText = html.replace(/<script[\s\S]*?<\/script>/gi, '')
-                           .replace(/<style[\s\S]*?<\/style>/gi, '')
-                           .replace(/<\/?[^>]+>/gi, ' ')
-                           .replace(/\s+/g, ' ')
-                           .trim();
           }
           
-          // Store the text for response
-          allTexts.push({
-            url: currentUrl,
-            text: fullText
-          });
-
           log.info(`Found ${emails.length} emails and ${facebookUrls.length} Facebook URLs on ${currentUrl}`);
         } catch (err) {
           log.error(`Failed to extract text from ${currentUrl}: ${err}`);
         }
 
-        // Extract and enqueue navigation links and common pages
+        // Extract and enqueue navigation links
         if (page) {
           try {
-            // Get navigation links from common selectors
             const navLinks = await page.evaluate(() => {
               const links = [];
               
-              // Common navigation selectors
               const navSelectors = [
                 'nav a', 'header a', '.navbar a', '.nav a', '.navigation a',
                 '.menu a', '.main-menu a', '.primary-menu a', '.top-menu a',
@@ -210,11 +291,10 @@ app.post('/extract-emails', async (req, res) => {
             
             // Enqueue navigation links
             if (navLinks.length > 0) {
-              log.info(`Found ${navLinks.length} navigation links on ${currentUrl}:`, navLinks.slice(0, 5)); // Log first 5 links
               await enqueueLinks({
                 urls: navLinks,
                 strategy: 'same-domain',
-                limit: 15 // Increased limit for better coverage
+                limit: 15
               });
             }
           } catch (err) {
@@ -225,56 +305,225 @@ app.post('/extract-emails', async (req, res) => {
         // Also enqueue general same-domain links as fallback
         await enqueueLinks({
           strategy: 'same-domain',
-          limit: 5 // Reduced since we're doing targeted navigation above
+          limit: 5
         });
       },
     });
 
     await crawler.run([url]);
 
-    // Remove duplicates and return results
+    // Remove duplicates and prepare results
     const uniqueEmails = [...new Set(extractedEmails)];
     const uniqueFacebookUrls = [...new Set(extractedFacebookUrls)];
 
-    // Build response object
-    const response = {
-      success: true,
-      url: url,
-      emailsFound: uniqueEmails.length,
+    // Update job with results
+    await updateJobStatus(jobId, 'done', {
       emails: uniqueEmails,
-      pagesCrawled: visitedUrls.size,
-      crawledUrls: Array.from(visitedUrls),
-      // extractedTexts: allTexts
-    };
+      facebook_urls: uniqueFacebookUrls,
+      crawled_urls: Array.from(visitedUrls),
+      pages_crawled: visitedUrls.size
+    });
 
-    // Only include Facebook URLs if no emails were found
-    if (uniqueEmails.length === 0) {
-      response.facebookUrlsFound = uniqueFacebookUrls.length;
-      response.facebookUrls = uniqueFacebookUrls;
-    }
-
-    res.json(response);
+    console.log(`Completed job ${jobId}: Found ${uniqueEmails.length} emails and ${uniqueFacebookUrls.length} Facebook URLs`);
 
   } catch (error) {
-    console.error('Error during email extraction:', error);
+    console.error(`Job ${jobId} failed:`, error);
+    
+    // Update job with error
+    await updateJobStatus(jobId, 'error', {
+      error: error.message || 'Unknown error occurred'
+    });
+  }
+}
+
+// Background worker system
+class JobWorker {
+  constructor() {
+    this.isRunning = false;
+    this.activeJobs = new Set();
+  }
+
+  async start() {
+    if (this.isRunning) return;
+    
+    this.isRunning = true;
+    console.log('Job worker started');
+    
+    // Process jobs continuously
+    while (this.isRunning) {
+      try {
+        await this.processNextBatch();
+        // Wait before checking for more jobs
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      } catch (error) {
+        console.error('Worker error:', error);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    }
+  }
+
+  async stop() {
+    this.isRunning = false;
+    console.log('Job worker stopped');
+  }
+
+  async processNextBatch() {
+    try {
+      // Get queued jobs
+      const { data: queuedJobs, error } = await supabase
+        .from('email_scrap_jobs')
+        .select('*')
+        .eq('status', 'queued')
+        .order('created_at', { ascending: true })
+        .limit(WORKER_BATCH_SIZE);
+
+      if (error) {
+        console.error('Error fetching queued jobs:', error);
+        return;
+      }
+
+      if (!queuedJobs || queuedJobs.length === 0) {
+        return; // No jobs to process
+      }
+
+      // Process jobs concurrently (limited by MAX_CONCURRENT_WORKERS)
+      const jobPromises = queuedJobs.slice(0, MAX_CONCURRENT_WORKERS).map(async (job) => {
+        if (this.activeJobs.has(job.job_id)) {
+          return; // Job already being processed
+        }
+
+        this.activeJobs.add(job.job_id);
+        
+        try {
+          await processJob(job.job_id, job.url);
+        } finally {
+          this.activeJobs.delete(job.job_id);
+        }
+      });
+
+      await Promise.all(jobPromises);
+
+    } catch (error) {
+      console.error('Error in processNextBatch:', error);
+    }
+  }
+}
+
+// Initialize worker
+const jobWorker = new JobWorker();
+
+// Modified /extract-emails endpoint - now adds jobs to queue
+app.post('/extract-emails', async (req, res) => {
+  try {
+    const { url } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ 
+        error: 'URL is required',
+        message: 'Please provide a URL in the request body'
+      });
+    }
+
+    // Validate URL format
+    try {
+      new URL(url);
+    } catch (error) {
+      return res.status(400).json({ 
+        error: 'Invalid URL format',
+        message: 'Please provide a valid URL'
+      });
+    }
+
+    // Generate unique job ID
+    const jobId = uuidv4();
+
+    // Create job in database
+    const job = await createJob(jobId, url);
+
+    // Add job to Crawlee request queue
+    await requestQueue.addRequest({
+      url: url,
+      userData: {
+        jobId: jobId,
+        originalUrl: url
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Job queued successfully',
+      job_id: jobId,
+      status: 'queued',
+      url: url
+    });
+
+  } catch (error) {
+    console.error('Error queuing job:', error);
     res.status(500).json({
       error: 'Internal server error',
-      message: 'Failed to extract emails from the provided URL'
+      message: 'Failed to queue the job'
+    });
+  }
+});
+
+// New endpoint to check job status
+app.get('/job/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    
+    const job = await getJob(jobId);
+    
+    if (!job) {
+      return res.status(404).json({
+        error: 'Job not found',
+        message: 'The specified job ID does not exist'
+      });
+    }
+
+    res.json({
+      success: true,
+      job: {
+        job_id: job.job_id,
+        url: job.url,
+        status: job.status,
+        emails: job.emails || [],
+        facebook_urls: job.facebook_urls || [],
+        crawled_urls: job.crawled_urls || [],
+        pages_crawled: job.pages_crawled || 0,
+        error: job.error,
+        created_at: job.created_at,
+        updated_at: job.updated_at,
+        started_at: job.started_at,
+        completed_at: job.completed_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting job:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'Failed to retrieve job information'
     });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Email extraction API is running' });
+  res.json({ 
+    status: 'OK', 
+    message: 'Email extraction API is running',
+    worker_status: jobWorker.isRunning ? 'running' : 'stopped',
+    active_jobs: jobWorker.activeJobs.size
+  });
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
-    message: 'Email and Facebook URL Extraction API',
+    message: 'Email and Facebook URL Extraction API (Queue-based)',
     endpoints: {
-      'POST /extract-emails': 'Extract emails and Facebook URLs from a website',
+      'POST /extract-emails': 'Queue a job to extract emails and Facebook URLs from a website',
+      'GET /job/:jobId': 'Check the status and results of a specific job',
       'GET /health': 'Health check'
     },
     usage: {
@@ -283,17 +532,51 @@ app.get('/', (req, res) => {
       body: { url: 'https://example.com' }
     },
     features: [
+      'Queue-based job processing',
       'Extract email addresses',
-      'Extract Facebook URLs (including profile.php?id=, /tr, pages, groups)',
-      'Extract Facebook URLs from script tags and JavaScript code (only if no emails found)',
+      'Extract Facebook URLs',
       'Crawl multiple pages within same domain',
       'Handle JavaScript-rendered content',
-      'Conditional script analysis: only analyzes scripts when no emails are found in visible content'
+      'Concurrent job processing with rate limiting',
+      'Job status tracking',
+      'Error handling and retry logic'
     ]
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Email extraction API running on port ${PORT}`);
-  console.log(`Visit http://localhost:${PORT} for API documentation`);
+// Initialize and start the server
+async function startServer() {
+  try {
+    await initializeQueue();
+    
+    // Start the job worker (this will run in background)
+    jobWorker.start().catch(error => {
+      console.error('Worker failed to start:', error);
+    });
+    
+    app.listen(PORT, () => {
+      console.log(`Email extraction API running on port ${PORT}`);
+      console.log(`Visit http://localhost:${PORT} for API documentation`);
+      console.log(`Worker system: ${MAX_CONCURRENT_WORKERS} concurrent workers, batch size: ${WORKER_BATCH_SIZE}`);
+    });
+    
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  await jobWorker.stop();
+  process.exit(0);
 });
+
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gracefully...');
+  await jobWorker.stop();
+  process.exit(0);
+});
+
+startServer();

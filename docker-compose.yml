@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  email-extraction-api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - MAX_CONCURRENT_WORKERS=${MAX_CONCURRENT_WORKERS:-4}
+      - WORKER_BATCH_SIZE=${WORKER_BATCH_SIZE:-5}
+      - RATE_LIMIT_DELAY=${RATE_LIMIT_DELAY:-1000}
+      - PORT=3000
+    volumes:
+      - ./storage:/app/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
