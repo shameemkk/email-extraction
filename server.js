@@ -5,6 +5,9 @@ import { AdaptivePlaywrightCrawler, RequestQueue, Configuration } from 'crawlee'
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
+// Disable Crawlee persistent storage to prevent lock file issues
+process.env.CRAWLEE_PERSIST_STORAGE = 'false';
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -25,23 +28,23 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Crawlee configuration
-Configuration.set('STORAGE_CLIENT_OPTIONS', {
-  storageDir: './storage',
-});
+// Configuration.set('STORAGE_CLIENT_OPTIONS', {
+//   storageDir: './storage',
+// });
 
-// Global request queue
-let requestQueue;
+// // Global request queue
+// let requestQueue;
 
-// Initialize request queue
-async function initializeQueue() {
-  try {
-    requestQueue = await RequestQueue.open('email-extraction-queue');
-    console.log('Request queue initialized');
-  } catch (error) {
-    console.error('Failed to initialize request queue:', error);
-    process.exit(1);
-  }
-}
+// // Initialize request queue
+// async function initializeQueue() {
+//   try {
+//     requestQueue = await RequestQueue.open('email-extraction-queue');
+//     console.log('Request queue initialized');
+//   } catch (error) {
+//     console.error('Failed to initialize request queue:', error);
+//     process.exit(1);
+//   }
+// }
 
 // Middleware
 app.use(cors());
@@ -198,7 +201,7 @@ async function processJob(jobId, url) {
       renderingTypeDetectionRatio: 0.1,
       maxRequestsPerCrawl: 20,
       maxConcurrency: 2, // Reduced concurrency for individual jobs
-      requestQueue,
+      // requestQueue,
 
       async requestHandler({ page, response, enqueueLinks, log, request }) {
         const currentUrl = request.url;
@@ -441,13 +444,13 @@ app.post('/extract-emails', async (req, res) => {
     const job = await createJob(jobId, url);
 
     // Add job to Crawlee request queue
-    await requestQueue.addRequest({
-      url: url,
-      userData: {
-        jobId: jobId,
-        originalUrl: url
-      }
-    });
+    // await requestQueue.addRequest({
+    //   url: url,
+    //   userData: {
+    //     jobId: jobId,
+    //     originalUrl: url
+    //   }
+    // });
 
     res.json({
       success: true,
@@ -547,7 +550,7 @@ app.get('/', (req, res) => {
 // Initialize and start the server
 async function startServer() {
   try {
-    await initializeQueue();
+    // await initializeQueue();
     
     // Start the job worker (this will run in background)
     jobWorker.start().catch(error => {
