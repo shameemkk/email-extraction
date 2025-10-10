@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { AdaptivePlaywrightCrawler, RequestQueue, Configuration } from 'crawlee';
+import { AdaptivePlaywrightCrawler } from 'crawlee';
 import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -12,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuration
-const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 4;
+const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 2;
 const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE) || 5;
 const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY) || 1000; // 1 second between requests
 
@@ -206,9 +206,12 @@ async function processJob(jobId, url) {
 
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
-      maxRequestsPerCrawl: 20,
+      // maxRequestsPerCrawl: 0,  // No crawl limit — allows infinite requests within same domain
       maxConcurrency: 2, // Reduced concurrency for individual jobs
-      // requestQueue,
+      // requestQueue, // Use global request queue if needed
+      //Prevent memory leak — auto-close inactive browser tabs
+      navigationTimeoutSecs: 30,
+      requestHandlerTimeoutSecs: 60,
 
       async requestHandler({ page, response, enqueueLinks, log, request }) {
         const currentUrl = request.url;
@@ -315,7 +318,7 @@ async function processJob(jobId, url) {
         // Also enqueue general same-domain links as fallback
         await enqueueLinks({
           strategy: 'same-domain',
-          limit: 5
+          limit: 15
         });
       },
     });
