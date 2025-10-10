@@ -15,6 +15,7 @@ const PORT = process.env.PORT || 3000;
 const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 2;
 const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE) || 5;
 const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY) || 1000; // 1 second between requests
+const MAX_DEPTH = parseInt(process.env.MAX_DEPTH) || 2;
 
 // Supabase configuration
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -206,124 +207,149 @@ async function processJob(jobId, url) {
 
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
-      // maxRequestsPerCrawl: 0,  // No crawl limit — allows infinite requests within same domain
+      maxRequestsPerCrawl: 20,  // No crawl limit — allows infinite requests within same domain
       maxConcurrency: 2, // Reduced concurrency for individual jobs
       // requestQueue, // Use global request queue if needed
       //Prevent memory leak — auto-close inactive browser tabs
-      navigationTimeoutSecs: 30,
+      navigationTimeoutSecs: 15,
       requestHandlerTimeoutSecs: 60,
 
       async requestHandler({ page, response, enqueueLinks, log, request }) {
-        const currentUrl = request.url;
-        
-        // Skip if already visited
-        if (visitedUrls.has(currentUrl)) {
-          return;
-        }
-        visitedUrls.add(currentUrl);
-
         try {
-          let emails = [];
-          let facebookUrls = [];
-          let htmlContent = '';
-          
-          if (page) {
-            // Get HTML content for extraction
-            htmlContent = await page.evaluate(() => {
-              return document.documentElement.outerHTML;
-            });
-            
-            // Extract emails from HTML content
-            emails = extractEmails(htmlContent);
-            extractedEmails.push(...emails);
-            
-            // Only extract Facebook URLs if no emails were found
-            if (emails.length === 0) {
-              facebookUrls = extractFacebookUrls(htmlContent);
-              extractedFacebookUrls.push(...facebookUrls);
-            }
-            
-          } else if (response) {
-            // If rendering was skipped (straight HTTP), use the raw HTML
-            const html = await response.text();
-            htmlContent = html;
-            
-            // Extract emails from HTML content
-            emails = extractEmails(htmlContent);
-            extractedEmails.push(...emails);
-            
-            // Only extract Facebook URLs if no emails were found
-            if (emails.length === 0) {
-              facebookUrls = extractFacebookUrls(htmlContent);
-              extractedFacebookUrls.push(...facebookUrls);
-            }
-          }
-          
-          log.info(`Found ${emails.length} emails and ${facebookUrls.length} Facebook URLs on ${currentUrl}`);
-        } catch (err) {
-          log.error(`Failed to extract text from ${currentUrl}: ${err}`);
-        }
+          const currentUrl = request.url;
+          const depth = request.userData?.depth ?? 0;
 
-        // Extract and enqueue navigation links
-        if (page) {
+          // Skip if already visited
+          if (visitedUrls.has(currentUrl)) {
+            return;
+          }
+          visitedUrls.add(currentUrl);
+
           try {
-            const navLinks = await page.evaluate(() => {
-              const links = [];
-              
-              const navSelectors = [
-                'nav a', 'header a', '.navbar a', '.nav a', '.navigation a',
-                '.menu a', '.main-menu a', '.primary-menu a', '.top-menu a',
-                '[role="navigation"] a', '.site-nav a', '.main-nav a'
-              ];
-              
-              navSelectors.forEach(selector => {
-                const elements = document.querySelectorAll(selector);
-                elements.forEach(el => {
-                  const href = el.getAttribute('href');
-                  if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-                    links.push(href);
+            let emails = [];
+            let facebookUrls = [];
+            let htmlContent = '';
+
+            if (page) {
+              // Get HTML content for extraction
+              htmlContent = await page.evaluate(() => {
+                return document.documentElement.outerHTML;
+              });
+
+              // Extract emails from HTML content
+              emails = extractEmails(htmlContent);
+              extractedEmails.push(...emails);
+
+              // Only extract Facebook URLs if no emails were found
+              if (emails.length === 0) {
+                facebookUrls = extractFacebookUrls(htmlContent);
+                extractedFacebookUrls.push(...facebookUrls);
+              }
+
+            } else if (response) {
+              // If rendering was skipped (straight HTTP), use the raw HTML
+              const html = await response.text();
+              htmlContent = html;
+
+              // Extract emails from HTML content
+              emails = extractEmails(htmlContent);
+              extractedEmails.push(...emails);
+
+              // Only extract Facebook URLs if no emails were found
+              if (emails.length === 0) {
+                facebookUrls = extractFacebookUrls(htmlContent);
+                extractedFacebookUrls.push(...facebookUrls);
+              }
+            }
+
+            log.info(`Found ${emails.length} emails and ${facebookUrls.length} Facebook URLs on ${currentUrl}`);
+          } catch (err) {
+            log.error(`Failed to extract text from ${currentUrl}: ${err}`);
+          }
+
+          // Extract and enqueue navigation links
+          if (page) {
+            try {
+              const navLinks = await page.evaluate(() => {
+                const links = [];
+
+                const navSelectors = [
+                  'nav a', 'header a', '.navbar a', '.nav a', '.navigation a',
+                  '.menu a', '.main-menu a', '.primary-menu a', '.top-menu a',
+                  '[role="navigation"] a', '.site-nav a', '.main-nav a'
+                ];
+
+                navSelectors.forEach(selector => {
+                  const elements = document.querySelectorAll(selector);
+                  elements.forEach(el => {
+                    const href = el.getAttribute('href');
+                    if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+                      links.push(href);
+                    }
+                  });
+                });
+
+                return links;
+              });
+
+              // Add specific common pages to crawl
+              const baseUrl = new URL(currentUrl);
+              const commonPages = ['/about/', '/contact/', '/about', '/contact', '/about-us/', '/contact-us/'];
+
+              commonPages.forEach(page => {
+                try {
+                  const fullUrl = new URL(page, baseUrl.origin).href;
+                  navLinks.push(fullUrl);
+                } catch (e) {
+                  // Skip invalid URLs
+                }
+              });
+
+              // Enqueue navigation links
+              if (depth < MAX_DEPTH && navLinks.length > 0) {
+                await enqueueLinks({
+                  urls: navLinks,
+                  strategy: 'same-domain',
+                  limit: 15,
+                  transformRequestFunction: (req) => {
+                    req.userData = { ...(req.userData || {}), depth: depth + 1 };
+                    return req;
                   }
                 });
-              });
-              
-              return links;
-            });
-            
-            // Add specific common pages to crawl
-            const baseUrl = new URL(currentUrl);
-            const commonPages = ['/about/', '/contact/', '/about', '/contact', '/about-us/', '/contact-us/'];
-            
-            commonPages.forEach(page => {
-              try {
-                const fullUrl = new URL(page, baseUrl.origin).href;
-                navLinks.push(fullUrl);
-              } catch (e) {
-                // Skip invalid URLs
+              }
+            } catch (err) {
+              log.warning(`Failed to extract navigation links from ${currentUrl}: ${err}`);
+            }
+          }
+
+          // Also enqueue general same-domain links as fallback
+          if (depth < MAX_DEPTH) {
+            await enqueueLinks({
+              strategy: 'same-domain',
+              limit: 15,
+              transformRequestFunction: (req) => {
+                req.userData = { ...(req.userData || {}), depth: depth + 1 };
+                return req;
               }
             });
-            
-            // Enqueue navigation links
-            if (navLinks.length > 0) {
-              await enqueueLinks({
-                urls: navLinks,
-                strategy: 'same-domain',
-                limit: 15
-              });
+          }
+        } catch (err) {
+          log.error(`Error on ${request?.url || 'unknown'}: ${err?.message || err}`);
+        } finally {
+          try {
+            if (page && !page.isClosed()) {
+              await page.close();
             }
-          } catch (err) {
-            log.warning(`Failed to extract navigation links from ${currentUrl}: ${err}`);
+          } catch (closeErr) {
+            if (typeof log?.debug === 'function') {
+              log.debug(`Failed to close page: ${closeErr?.message || closeErr}`);
+            }
           }
         }
-        
-        // Also enqueue general same-domain links as fallback
-        await enqueueLinks({
-          strategy: 'same-domain',
-          limit: 15
-        });
       },
     });
 
-    await crawler.run([url]);
+    await crawler.run([{ url, userData: { depth: 0 } }]);
 
     // Remove duplicates and prepare results
     const uniqueEmails = [...new Set(extractedEmails)];
