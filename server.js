@@ -16,6 +16,7 @@ const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 2
 const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE) || 5;
 const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY) || 1000; // 1 second between requests
 const MAX_DEPTH = parseInt(process.env.MAX_DEPTH) || 2;
+const PER_INSTANCE_REQUEST_LIMIT = parseInt(process.env.PER_INSTANCE_REQUEST_LIMIT) || 30;
 
 // Supabase configuration
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -207,7 +208,7 @@ async function processJob(jobId, url) {
 
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
-      maxRequestsPerCrawl: 20,  // No crawl limit — allows infinite requests within same domain
+      // maxRequestsPerCrawl intentionally disabled; we use a per-instance request limit instead
       maxConcurrency: 2, // Reduced concurrency for individual jobs
       // requestQueue, // Use global request queue if needed
       //Prevent memory leak — auto-close inactive browser tabs
@@ -218,6 +219,16 @@ async function processJob(jobId, url) {
         try {
           const currentUrl = request.url;
           const depth = request.userData?.depth ?? 0;
+          const instanceId = request.userData?.instanceId;
+          const count = request.userData?.count ?? 0;
+
+          // Enforce per-instance request limit
+          if (count >= PER_INSTANCE_REQUEST_LIMIT) {
+            if (typeof log?.info === 'function') {
+              log.info(`Instance ${instanceId || jobId} reached its per-instance limit (${PER_INSTANCE_REQUEST_LIMIT})`);
+            }
+            return;
+          }
 
           // Skip if already visited
           if (visitedUrls.has(currentUrl)) {
@@ -312,7 +323,12 @@ async function processJob(jobId, url) {
                   strategy: 'same-domain',
                   limit: 15,
                   transformRequestFunction: (req) => {
-                    req.userData = { ...(req.userData || {}), depth: depth + 1 };
+                    req.userData = {
+                      ...(req.userData || {}),
+                      depth: depth + 1,
+                      instanceId: instanceId || jobId,
+                      count: count + 1,
+                    };
                     return req;
                   }
                 });
@@ -328,7 +344,12 @@ async function processJob(jobId, url) {
               strategy: 'same-domain',
               limit: 15,
               transformRequestFunction: (req) => {
-                req.userData = { ...(req.userData || {}), depth: depth + 1 };
+                req.userData = {
+                  ...(req.userData || {}),
+                  depth: depth + 1,
+                  instanceId: instanceId || jobId,
+                  count: count + 1,
+                };
                 return req;
               }
             });
@@ -349,7 +370,7 @@ async function processJob(jobId, url) {
       },
     });
 
-    await crawler.run([{ url, userData: { depth: 0 } }]);
+    await crawler.run([{ url, userData: { depth: 0, instanceId: jobId, count: 0 } }]);
 
     // Remove duplicates and prepare results
     const uniqueEmails = [...new Set(extractedEmails)];

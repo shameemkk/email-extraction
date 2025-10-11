@@ -141,6 +141,7 @@ Health check endpoint.
 - `MAX_CONCURRENT_WORKERS`: Maximum number of concurrent workers (default: 4)
 - `WORKER_BATCH_SIZE`: Number of jobs to fetch per batch (default: 5)
 - `RATE_LIMIT_DELAY`: Delay between requests in milliseconds (default: 1000)
+- `PER_INSTANCE_REQUEST_LIMIT`: Max pages per crawler instance (default: 30)
 - `PORT`: Server port (default: 3000)
 
 ### Database Schema
@@ -256,3 +257,14 @@ With the default configuration (4 concurrent workers):
 - **Job Processing**: Processes jobs at ~4-8 jobs per minute (depending on website complexity)
 - **Memory Usage**: Stable memory usage even under high load
 - **Error Rate**: <1% error rate under normal conditions
+
+## Per-Instance Request Limiting
+
+This project enforces a per-instance request limit using `request.userData` to track depth and a per-instance counter. Each crawler run (identified by `instanceId`) stops enqueuing new links when it reaches `PER_INSTANCE_REQUEST_LIMIT` requests.
+
+Key points:
+- Each job seeds `userData` with `{ instanceId: jobId, count: 0, depth: 0 }`.
+- Every enqueued request increments `count` and preserves `instanceId`.
+- When `count >= PER_INSTANCE_REQUEST_LIMIT`, the crawler stops enqueuing new links for that instance.
+
+This allows `maxRequestsPerCrawl` to remain unlimited while still bounding work per job.
