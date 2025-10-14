@@ -202,9 +202,12 @@ async function processJob(jobId, url) {
     // Update job status to processing
     await updateJobStatus(jobId, 'processing');
 
-    const extractedEmails = [];
-    const extractedFacebookUrls = [];
-    const visitedUrls = new Set();
+    // Create isolated data collections for this specific job
+    const jobData = {
+      extractedEmails: [],
+      extractedFacebookUrls: [],
+      visitedUrls: new Set()
+    };
 
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
@@ -214,6 +217,10 @@ async function processJob(jobId, url) {
       //Prevent memory leak — auto-close inactive browser tabs
       navigationTimeoutSecs: 15,
       requestHandlerTimeoutSecs: 60,
+      // Add error handling for failed requests
+      failedRequestHandler: async ({ request, error }) => {
+        console.log(`Request failed: ${request.url} - ${error.message}`);
+      },
 
       async requestHandler({ page, response, enqueueLinks, log, request }) {
         try {
@@ -231,10 +238,10 @@ async function processJob(jobId, url) {
           }
 
           // Skip if already visited
-          if (visitedUrls.has(currentUrl)) {
+          if (jobData.visitedUrls.has(currentUrl)) {
             return;
           }
-          visitedUrls.add(currentUrl);
+          jobData.visitedUrls.add(currentUrl);
 
           try {
             let emails = [];
@@ -249,12 +256,12 @@ async function processJob(jobId, url) {
 
               // Extract emails from HTML content
               emails = extractEmails(htmlContent);
-              extractedEmails.push(...emails);
+              jobData.extractedEmails.push(...emails);
 
               // Only extract Facebook URLs if no emails were found
               if (emails.length === 0) {
                 facebookUrls = extractFacebookUrls(htmlContent);
-                extractedFacebookUrls.push(...facebookUrls);
+                jobData.extractedFacebookUrls.push(...facebookUrls);
               }
 
             } else if (response) {
@@ -264,12 +271,12 @@ async function processJob(jobId, url) {
 
               // Extract emails from HTML content
               emails = extractEmails(htmlContent);
-              extractedEmails.push(...emails);
+              jobData.extractedEmails.push(...emails);
 
               // Only extract Facebook URLs if no emails were found
               if (emails.length === 0) {
                 facebookUrls = extractFacebookUrls(htmlContent);
-                extractedFacebookUrls.push(...facebookUrls);
+                jobData.extractedFacebookUrls.push(...facebookUrls);
               }
             }
 
@@ -355,7 +362,12 @@ async function processJob(jobId, url) {
             });
           }
         } catch (err) {
-          log.error(`Error on ${request?.url || 'unknown'}: ${err?.message || err}`);
+          // Handle timeout errors gracefully
+          if (err.message && err.message.includes('Timeout')) {
+            log.warning(`Timeout on ${request?.url || 'unknown'}: ${err.message}`);
+          } else {
+            log.error(`Error on ${request?.url || 'unknown'}: ${err?.message || err}`);
+          }
         } finally {
           try {
             if (page && !page.isClosed()) {
@@ -373,15 +385,15 @@ async function processJob(jobId, url) {
     await crawler.run([{ url, userData: { depth: 0, instanceId: jobId, count: 0 } }]);
 
     // Remove duplicates and prepare results
-    const uniqueEmails = [...new Set(extractedEmails)];
-    const uniqueFacebookUrls = [...new Set(extractedFacebookUrls)];
+    const uniqueEmails = [...new Set(jobData.extractedEmails)];
+    const uniqueFacebookUrls = [...new Set(jobData.extractedFacebookUrls)];
 
     // Update job with results
     await updateJobStatus(jobId, 'done', {
       emails: uniqueEmails,
       facebook_urls: uniqueFacebookUrls,
-      crawled_urls: Array.from(visitedUrls),
-      pages_crawled: visitedUrls.size
+      crawled_urls: Array.from(jobData.visitedUrls),
+      pages_crawled: jobData.visitedUrls.size
     });
 
     console.log(`Completed job ${jobId}: Found ${uniqueEmails.length} emails and ${uniqueFacebookUrls.length} Facebook URLs`);
