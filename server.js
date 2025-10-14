@@ -12,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuration
-const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 2;
+const MAX_CONCURRENT_WORKERS = parseInt(process.env.MAX_CONCURRENT_WORKERS) || 1;
 const WORKER_BATCH_SIZE = parseInt(process.env.WORKER_BATCH_SIZE) || 5;
 const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY) || 1000; // 1 second between requests
 const MAX_DEPTH = parseInt(process.env.MAX_DEPTH) || 2;
