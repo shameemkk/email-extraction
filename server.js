@@ -212,7 +212,7 @@ async function processJob(jobId, url) {
     const crawler = new AdaptivePlaywrightCrawler({
       renderingTypeDetectionRatio: 0.1,
       // maxRequestsPerCrawl intentionally disabled; we use a per-instance request limit instead
-      maxConcurrency: 2, // Reduced concurrency for individual jobs
+      maxConcurrency: 1, // Reduced concurrency for individual jobs
       // requestQueue, // Use global request queue if needed
       //Prevent memory leak — auto-close inactive browser tabs
       navigationTimeoutSecs: 15,
